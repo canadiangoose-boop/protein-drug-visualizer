@@ -47,6 +47,7 @@
 # ═══════════════════════════════════════════════════════════════════════════
 import sys
 import time
+import argparse
 import threading
 import numpy as np
 
@@ -55,6 +56,12 @@ try:
 except ImportError:
     print("ERROR: pyvista not found.\n  Install with:  pip install pyvista")
     sys.exit(1)
+
+try:
+    from nn_scorer import NNScorer
+    _NN_AVAILABLE = True
+except ImportError:
+    _NN_AVAILABLE = False
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -633,13 +640,25 @@ class ProteinVisualizerApp:
       6. If threshold crossed → InducedFitAnim   (Agent 3)
     """
 
-    def __init__(self):
+    def __init__(self, use_nn: bool = False):
         # ── Sub-agents ─────────────────────────────────────────────────
         self.physics  = PhysicsEngine()
         self.builder  = MeshBuilder()
         self.protein  = make_protein_atoms()
         self.drug     = make_drug_atoms()
         self.animator = InducedFitAnimator(self.protein, self.drug)
+
+        # ── NN scorer (optional) ────────────────────────────────────────
+        self._nn_scorer = None
+        if use_nn:
+            if not _NN_AVAILABLE:
+                print("[NN] nn_scorer.py not found — falling back to physics engine.")
+            elif not NNScorer.is_available():
+                print("[NN] No trained model found. Run  python train.py  first.")
+                print("[NN] Falling back to physics engine.")
+            else:
+                self._nn_scorer = NNScorer()
+                print("[NN] Neural network scorer loaded ✓")
 
         # ── App state ──────────────────────────────────────────────────
         self._approach_t       = 0.0
@@ -769,42 +788,76 @@ class ProteinVisualizerApp:
 
     def _update_hud(self, e: dict):
         """Refresh the energy heads-up display."""
-        total = e['total']
-        n_hb  = e['n_hbonds']
+        mode     = e.get('_mode', 'physics')
+        nn_total = e.get('_nn_total', None)
 
-        if total > 0:
+        # Displayed total: NN prediction if available, else physics
+        display_total = nn_total if nn_total is not None else e['total']
+        n_hb = e['n_hbonds']
+
+        if display_total > 0:
             status = '⚠  REPULSIVE — move drug closer'
             hcol   = 'tomato'
-        elif total > -3:
+        elif display_total > -3:
             status = '◌  WEAK INTERACTION'
             hcol   = '#CCCC44'
-        elif total > INDUCED_FIT_THRESHOLD:
-            status = f'●  DOCKING...  ({total:.1f} / {INDUCED_FIT_THRESHOLD:.1f})'
+        elif display_total > INDUCED_FIT_THRESHOLD:
+            status = f'●  DOCKING...  ({display_total:.1f} / {INDUCED_FIT_THRESHOLD:.1f})'
             hcol   = 'cyan'
         else:
             status = '✦  BOUND  —  INDUCED FIT COMPLETE!'
             hcol   = 'lime'
 
-        hud = (
-            f"╔══ BINDING ENERGY ══════════════╗\n"
-            f"║  ΔG total    :  {total:+7.2f} kcal/mol ║\n"
-            f"╠════════════════════════════════╣\n"
-            f"║  Van der Waals  {e['vdw']:+7.2f}         ║\n"
-            f"║  Electrostatic  {e['electrostatic']:+7.2f}         ║\n"
-            f"║  H-Bonds ({n_hb:1d})    {e['hbonds']:+7.2f}         ║\n"
-            f"║  Hydrophobic    {e['hydrophobic']:+7.2f}         ║\n"
-            f"╠════════════════════════════════╣\n"
-            f"║  {status}\n"
-            f"╚════════════════════════════════╝\n"
-            f"\n"
-            f" ── INTERACTION LEGEND ────────\n"
-            f"  ╌╌  Cyan   = Hydrogen Bond\n"
-            f"  ╌╌  Orange = Ionic / Electrostatic\n"
-            f"  ╌╌  Green  = Hydrophobic\n"
-            f"  ╌╌  Grey   = Van der Waals\n"
-            f" ──────────────────────────────\n"
-            f"  Induced-fit at: {INDUCED_FIT_THRESHOLD} kcal/mol"
-        )
+        scorer_tag = '🤖 NN scorer' if mode == 'nn' else '⚙  Physics engine'
+
+        if mode == 'nn':
+            hud = (
+                f"╔══ BINDING ENERGY [NN MODE] ════╗\n"
+                f"║  ΔG (ML pred): {display_total:+7.2f} kcal/mol ║\n"
+                f"║  ΔG (physics): {e['total']:+7.2f} kcal/mol ║\n"
+                f"╠════════════════════════════════╣\n"
+                f"║  Physics breakdown:             ║\n"
+                f"║   Van der Waals {e['vdw']:+7.2f}          ║\n"
+                f"║   Electrostatic {e['electrostatic']:+7.2f}          ║\n"
+                f"║   H-Bonds ({n_hb:1d})   {e['hbonds']:+7.2f}          ║\n"
+                f"║   Hydrophobic   {e['hydrophobic']:+7.2f}          ║\n"
+                f"╠════════════════════════════════╣\n"
+                f"║  {status}\n"
+                f"╚════════════════════════════════╝\n"
+                f"\n"
+                f"  {scorer_tag}\n"
+                f"\n"
+                f" ── INTERACTION LEGEND ────────\n"
+                f"  ╌╌  Cyan   = Hydrogen Bond\n"
+                f"  ╌╌  Orange = Ionic / Electrostatic\n"
+                f"  ╌╌  Green  = Hydrophobic\n"
+                f"  ╌╌  Grey   = Van der Waals\n"
+                f" ──────────────────────────────\n"
+                f"  Induced-fit at: {INDUCED_FIT_THRESHOLD} kcal/mol"
+            )
+        else:
+            hud = (
+                f"╔══ BINDING ENERGY ══════════════╗\n"
+                f"║  ΔG total    :  {display_total:+7.2f} kcal/mol ║\n"
+                f"╠════════════════════════════════╣\n"
+                f"║  Van der Waals  {e['vdw']:+7.2f}          ║\n"
+                f"║  Electrostatic  {e['electrostatic']:+7.2f}          ║\n"
+                f"║  H-Bonds ({n_hb:1d})    {e['hbonds']:+7.2f}          ║\n"
+                f"║  Hydrophobic    {e['hydrophobic']:+7.2f}          ║\n"
+                f"╠════════════════════════════════╣\n"
+                f"║  {status}\n"
+                f"╚════════════════════════════════╝\n"
+                f"\n"
+                f"  {scorer_tag}\n"
+                f"\n"
+                f" ── INTERACTION LEGEND ────────\n"
+                f"  ╌╌  Cyan   = Hydrogen Bond\n"
+                f"  ╌╌  Orange = Ionic / Electrostatic\n"
+                f"  ╌╌  Green  = Hydrophobic\n"
+                f"  ╌╌  Grey   = Van der Waals\n"
+                f" ──────────────────────────────\n"
+                f"  Induced-fit at: {INDUCED_FIT_THRESHOLD} kcal/mol"
+            )
 
         self.p.remove_actor(self._hud_name)
         self.p.add_text(
@@ -852,11 +905,23 @@ class ProteinVisualizerApp:
         """
         self._rebuild_drug_scene()
 
-        energies = self.physics.score(self.drug, self.protein)
+        # Always run physics for interaction line positions
+        physics_result = self.physics.score(self.drug, self.protein)
+
+        if self._nn_scorer is not None:
+            # Override total energy with NN prediction; keep interaction lines
+            nn_total = self._nn_scorer.predict(self.drug, self.protein)
+            physics_result['_nn_total'] = nn_total
+            physics_result['_mode']     = 'nn'
+        else:
+            physics_result['_mode'] = 'physics'
+
+        energies = physics_result
         self._rebuild_interactions(energies['interactions'])
         self._update_hud(energies)
 
-        if (energies['total'] < INDUCED_FIT_THRESHOLD
+        trigger_energy = energies.get('_nn_total', energies['total'])
+        if (trigger_energy < INDUCED_FIT_THRESHOLD
                 and not self._induced_fit_done):
             self._induced_fit_done = True
             self._trigger_induced_fit()
@@ -1018,5 +1083,13 @@ class ProteinVisualizerApp:
 # ═══════════════════════════════════════════════════════════════════════════
 
 if __name__ == '__main__':
-    app = ProteinVisualizerApp()
+    parser = argparse.ArgumentParser(
+        description='Interactive Protein-Drug Binding Visualizer')
+    parser.add_argument(
+        '--use-nn', action='store_true',
+        help='Score binding energy with the trained neural network '
+             '(run python train.py first to generate the model)')
+    args = parser.parse_args()
+
+    app = ProteinVisualizerApp(use_nn=args.use_nn)
     app.run()

@@ -11,3 +11,5 @@ build/
 venv/
 .DS_Store
 *.log
+models/binding_scorer_best.pt
+wandb/
